@@ -8,64 +8,59 @@ namespace Task1
 {
     public class Container
     {
-		Dictionary<Type, Type> registeredTypes = new Dictionary<Type, Type>();
+        readonly Dictionary<Type, Type> registeredTypes = new Dictionary<Type, Type>();
 
 		public void AddAssembly(Assembly assembly)
 		{
-			Assembly currAssembly = Assembly.GetExecutingAssembly();
+			Assembly currAssembly = assembly;
 
 			var types = currAssembly.ExportedTypes;
-			foreach (var type in types)
-			{
-				// types that have [Import] attribute
-				if (type.GetProperties().Length >= 1)
-				{
-					foreach (var r in type.GetProperties())
-					{
-						foreach (var att in r.GetCustomAttributes(typeof(ImportAttribute), true))
-						{
-							AddType(r.PropertyType);
-						}
-					}
-				}
-				// [ImportConstructor] attributes
-				if (type.GetCustomAttributes(typeof(ImportConstructorAttribute), true).Length >= 1)
-				{
-					var constructorImport = type.GetCustomAttributes(typeof(ImportConstructorAttribute), true);
-					foreach (var ci in constructorImport)
-					{
-						var ctor = type.GetConstructors().Where(y => y.GetParameters().Length > 0).First();
-						AddType(type);
-						foreach (var par in ctor.GetParameters())
-						{
-							AddType(par.ParameterType);
-						}
 
-					}
-				}
-				// export attributes
-				if (type.GetCustomAttributes(typeof(ExportAttribute), true).Length >= 1)
-				{
-					foreach (var exportAttribute in type.GetCustomAttributes(typeof(ExportAttribute), true))
-					{
-						AddType(type);
-					}
-				}
-			}
+			var exportTypes = types.Where(t => t.CustomAttributes.Any(a => a.AttributeType == typeof(ExportAttribute)))
+				.Select(t => new {
+					type = t,
+					baseType = (Type)t.CustomAttributes
+							.FirstOrDefault(a => a.AttributeType == typeof(ExportAttribute))
+							.ConstructorArguments
+							.FirstOrDefault(c => c.ArgumentType == typeof(Type)).Value
+				}).ToList();
+			exportTypes.ForEach(t => {
+				if (t.baseType == null)
+					AddType(t.type);
+				else
+					AddType(t.type, t.baseType);
+			});
 
+			types.Where(t => t.GetProperties().Any(p => p.CustomAttributes.Any(a => a.AttributeType == typeof(ImportAttribute)))).ToList().ForEach(t => AddType(t));
+			types.Where(t => t.CustomAttributes.Any(a => a.AttributeType == typeof(ImportConstructorAttribute))).ToList().ForEach(t => AddType(t));
 
 		}
+
+
+	
 
 		public void AddType(Type type)
 		{
 			if (!registeredTypes.ContainsKey(type))
 				registeredTypes.Add(type, type);
+			else
+			{
+				throw new ContainerException("Duplicating");
+			}
 		}
 
 		public void AddType(Type type, Type baseType)
 		{
 			if (!registeredTypes.ContainsKey(type))
-				registeredTypes.Add(type, baseType);
+			{
+				registeredTypes.Add(baseType, type);
+				registeredTypes.Add(type, type);
+			}
+			else
+            {
+				throw new ContainerException("Duplicating");
+            }
+
 		}
 
 		public object Get(Type type)
@@ -75,11 +70,12 @@ namespace Task1
 			{
 				throw new ContainerException($"Can't create the instance of {type.FullName}. No mapping for the type!");
 			}
-			if (type.IsAbstract) throw new ContainerException(string.Format("Тип ({0}) является абстрактным. Объекты с таким типом нельзя создавать", type.Name));
+			var realType = registeredTypes[type];
+			if (realType.IsAbstract) throw new ContainerException(string.Format("Тип ({0}) является абстрактным. Объекты с таким типом нельзя создавать", type.Name));
 
 			object injectedObject = null;
-			var constrs = type.GetConstructors().Where(x => x.GetParameters().Length > 0);
-			if (constrs != null && type.GetCustomAttributes(typeof(ImportConstructorAttribute), true).Length >= 1)
+			var constrs = realType.GetConstructors().Where(x => x.GetParameters().Length > 0);
+			if (constrs != null && realType.GetCustomAttributes(typeof(ImportConstructorAttribute), true).Length >= 1)
 			{
 				var constInfo = constrs.First();
 				ParameterInfo[] ps = constInfo.GetParameters();
@@ -89,14 +85,14 @@ namespace Task1
 					paramets[i] = Get(ps[i].ParameterType);
 				}
 
-				injectedObject = (object)Activator.CreateInstance(type, paramets);
+				injectedObject = (object)Activator.CreateInstance(realType, paramets);
 				return injectedObject;
 			}
 
-			var propsInfo = type.GetProperties().Where(p => p.GetCustomAttribute(typeof(ImportAttribute), true) != null);
+			var propsInfo = realType.GetProperties().Where(p => p.GetCustomAttribute(typeof(ImportAttribute), true) != null);
 			if (propsInfo != null)
 			{
-				injectedObject = (object)Activator.CreateInstance(type);
+				injectedObject = (object)Activator.CreateInstance(realType);
 				foreach (var p in propsInfo)
 				{
 					if (registeredTypes.ContainsKey(p.PropertyType))
